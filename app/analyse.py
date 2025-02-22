@@ -4,7 +4,7 @@ import hashlib
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Never
 import logfire
 from pydantic_ai import Agent
 from pydantic_graph import BaseNode, GraphRunContext, Graph, End
@@ -104,13 +104,13 @@ class NewEmailExchange(BaseNode[ThreadState]):
 
 
 @dataclass
-class NewReply(BaseNode[ThreadState, None, EmailDrop]):
+class NewReply(BaseNode[ThreadState]):
     email: EmailInfo
 
-    async def run(self, ctx: GraphRunContext[ThreadState]) -> AgentReply | ForwardEmail | End[EmailDrop]:
+    async def run(self, ctx: GraphRunContext[ThreadState]) -> AgentReply | ForwardEmail | DropEmail:
         email = Email(sender=self.email.from_, plain_text=self.email.text)
         if ctx.state.state == 'dropping':
-            return End(EmailDrop('already dropping'))
+            return DropEmail(EmailDrop('already dropping'))
         elif ctx.state.state == 'forwarding':
             ctx.state.emails.append(email)
             return ForwardEmail(EmailOk('already forwarding'))
@@ -124,7 +124,7 @@ class NewReply(BaseNode[ThreadState, None, EmailDrop]):
             return AgentReply(result.data)
         else:
             ctx.state.state = 'dropping'
-            return End(result.data)
+            return DropEmail(result.data)
 
 
 @dataclass
@@ -143,8 +143,16 @@ class ForwardEmail(BaseNode[ThreadState]):
         raise NotImplementedError('ForwardEmail should not be run')
 
 
+@dataclass
+class DropEmail(BaseNode[ThreadState]):
+    response: EmailDrop
+
+    async def run(self, ctx: GraphRunContext[ThreadState]) -> NewReply:
+        raise NotImplementedError('DropEmail should not be run')
+
+
 email_graph = Graph(
-    nodes=[NewEmailExchange, NewReply, AgentReply, ForwardEmail]
+    nodes=[NewEmailExchange, NewReply, AgentReply, ForwardEmail, DropEmail]
 )
 
 
@@ -161,7 +169,7 @@ async def analyse_email(email: EmailInfo) -> EmailOk | EmailReply | EmailDrop:
         ref_hash = hashlib.md5(email.message_id.encode()).hexdigest()
         state_path = Path(f'threads/{ref_hash:.7}.json')
 
-    node: BaseNode[ThreadState, None, EmailDrop]
+    node: BaseNode[ThreadState, None, Never]
     if state is None:
         state = ThreadState()
         node = NewEmailExchange(email)
@@ -172,21 +180,18 @@ async def analyse_email(email: EmailInfo) -> EmailOk | EmailReply | EmailDrop:
         history = []
         while True:
             next_node = await email_graph.next(node, history, state=state)
-            if isinstance(next_node, End):
-                response = next_node.data
-            elif isinstance(next_node, AgentReply | ForwardEmail):
+            if isinstance(next_node, AgentReply | ForwardEmail | DropEmail):
                 response = next_node.response
+                state_path.parent.mkdir(exist_ok=True)
+                state_path.write_text(state.model_dump_json(indent=2))
+                return response
             else:
+                assert isinstance(next_node, BaseNode)
                 node = next_node
-                continue
-
-            state_path.parent.mkdir(exist_ok=True)
-            state_path.write_text(state.model_dump_json(indent=2))
-            return response
 
 
 if __name__ == '__main__':
     print('generating mermaid diagram...')
     path = Path('email_graph.jpg')
-    email_graph.mermaid_save(path)
+    email_graph.mermaid_save(path, start_node=[NewEmailExchange], highlighted_nodes=[NewReply])
     print(f'saved mermaid diagram to {path}')

@@ -12,3 +12,4 @@ wheels/
 /cf-worker/.wrangler
 /cf-worker/node_modules
 /threads/
+/email_graph.jpg
