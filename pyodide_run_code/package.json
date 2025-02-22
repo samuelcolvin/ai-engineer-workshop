@@ -1,0 +1,9 @@
+{
+  "name": "run-code",
+  "version": "0.0.0",
+  "main": "run.mjs",
+  "license": "MIT",
+  "dependencies": {
+    "pyodide": "^0.27.2"
+  }
+}
