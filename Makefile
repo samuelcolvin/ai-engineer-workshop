@@ -25,7 +25,7 @@ lint:
 
 .PHONY: typecheck
 typecheck:
-	PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright
+	PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run pyright app
 
 .PHONY: dev
 dev:

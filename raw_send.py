@@ -11,7 +11,7 @@ msg = EmailMessage()
 msg['Subject'] = sys.argv[1]
 msg['From'] = 'mail-server-test@helpmanual.io'
 msg['To'] = 'spiced-ham@pydantic.io'
-msg['Message-ID'] = make_msgid()
+msg['Message-ID'] = make_msgid().replace('\n', '')
 msg.set_content(sys.argv[2])
 
 with smtplib.SMTP('route1.mx.cloudflare.net', 0) as server:

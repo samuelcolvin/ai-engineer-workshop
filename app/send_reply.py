@@ -1,5 +1,6 @@
 from __future__ import annotations as _annotations
 import os
+import re
 from html import escape
 from textwrap import indent
 from typing import TYPE_CHECKING
@@ -59,8 +60,12 @@ async def send_reply(client: AsyncClient, email: EmailInfo, email_reply: EmailRe
         html_body=html,
         configuration_set='spiced-ham',
         smtp_headers={
-            'In-Reply-To': email.message_id,
-            'References': f'{email.references} {email.message_id}' if email.references else email.message_id,
+            'In-Reply-To': remove_nl(email.message_id),
+            'References': remove_nl(f'{email.references} {email.message_id}' if email.references else email.message_id),
         },
     )
     logfire.info(f'email sent: {message_id=}')
+
+
+def remove_nl(text: str) -> str:
+    return re.sub('[\r\n]', '', text)

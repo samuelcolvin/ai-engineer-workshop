@@ -1,6 +1,8 @@
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from email.message import Message
 from typing import AsyncIterator, Mapping, Any, Literal
 
 from pydantic import BaseModel
@@ -19,6 +21,7 @@ import logfire
 
 logfire.configure(scrubbing=False)
 logfire.info('running server')
+logfire.instrument_openai()
 
 
 @dataclass
@@ -70,7 +73,7 @@ async def analyze_email(request: Request):
         subject=str(msg['subject']),
         to=str(msg['to']),
         message_id=str(msg['Message-ID']),
-        references=str(msg['References']) if 'References' in msg else None,
+        references=get_references(msg),
         timestamp=timestamp,
         text=text_body,
         html=html_body,
@@ -84,6 +87,11 @@ async def analyze_email(request: Request):
 
     response = AnalysisResponse(status=email_analysis.status)
     return Response(response.model_dump_json(), headers={'content-type': 'application/json'})
+
+
+def get_references(msg: Message) -> str | None:
+    if 'References' in msg:
+        return re.sub(r'\s+', ' ', str(msg['References']))
 
 
 app = Starlette(routes=[Route('/', analyze_email, methods=['post'])], lifespan=lifespan)
