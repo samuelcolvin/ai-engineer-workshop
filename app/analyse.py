@@ -1,15 +1,16 @@
 from __future__ import annotations as _annotations
 
-import hashlib
+import re
 import tomllib
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Never
+from typing import TYPE_CHECKING, Literal, cast
 import logfire
 from pydantic_ai import Agent
 from pydantic_graph import BaseNode, GraphRunContext, Graph, End
 from pydantic_ai.format_as_xml import format_as_xml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, TypeAdapter
 
 
 if TYPE_CHECKING:
@@ -78,120 +79,120 @@ def load_reply_prompt():
 
 
 @dataclass
-class Email:
+class ThreadMessage:
     sender: str
     plain_text: str | None
 
 
-class ThreadState(BaseModel):
-    emails: list[Email] = Field(default_factory=list)
-    state: Literal['replying', 'forwarding', 'dropping'] = 'replying'
-
-
-@dataclass
-class NewEmailExchange(BaseNode[ThreadState]):
-    email: EmailInfo
-
-    async def run(self, ctx: GraphRunContext[ThreadState]) -> AgentReply | ForwardEmail:
-        email = Email(sender=self.email.from_, plain_text=self.email.text or self.email.html)
-        ctx.state.emails.append(email)
-        result = await new_thread_agent.run(f'New email thread:\n{format_as_xml(email)}')
-        if result.data.status == 'ok':
-            ctx.state.state = 'forwarding'
-            return ForwardEmail(result.data)
-        else:
-            return AgentReply(result.data)
-
-
-@dataclass
-class NewReply(BaseNode[ThreadState]):
-    email: EmailInfo
-
-    async def run(self, ctx: GraphRunContext[ThreadState]) -> AgentReply | ForwardEmail | DropEmail:
-        email = Email(sender=self.email.from_, plain_text=self.email.text)
-        if ctx.state.state == 'dropping':
-            return DropEmail(EmailDrop('already dropping'))
-        elif ctx.state.state == 'forwarding':
-            ctx.state.emails.append(email)
-            return ForwardEmail(EmailOk('already forwarding'))
-
-        ctx.state.emails.append(email)
-        result = await new_reply_agent.run(f'New reply in thread:\n{format_as_xml(ctx.state.emails)}')
-        if result.data.status == 'ok':
-            ctx.state.state = 'forwarding'
-            return ForwardEmail(result.data)
-        elif result.data.status == 'reply':
-            return AgentReply(result.data)
-        else:
-            ctx.state.state = 'dropping'
-            return DropEmail(result.data)
-
-
-@dataclass
-class AgentReply(BaseNode[ThreadState]):
-    response: EmailReply
-
-    async def run(self, ctx: GraphRunContext[ThreadState]) -> NewReply:
-        raise NotImplementedError('AgentReply should not be run')
-
-
-@dataclass
-class ForwardEmail(BaseNode[ThreadState]):
-    response: EmailOk
-
-    async def run(self, ctx: GraphRunContext[ThreadState]) -> NewReply:
-        raise NotImplementedError('ForwardEmail should not be run')
-
-
-@dataclass
-class DropEmail(BaseNode[ThreadState]):
-    response: EmailDrop
-
-    async def run(self, ctx: GraphRunContext[ThreadState]) -> NewReply:
-        raise NotImplementedError('DropEmail should not be run')
-
-
-email_graph = Graph(
-    nodes=[NewEmailExchange, NewReply, AgentReply, ForwardEmail, DropEmail]
+extract_agent = Agent(
+    'openai:gpt-4o',
+    result_type=list[ThreadMessage],
+    system_prompt='Extract the individual emails from the thread thread of replies.',
 )
+
+
+class ThreadStatus(StrEnum):
+    forwarding = 'forwarding'
+    dropping = 'dropping'
+
+
+ta = TypeAdapter(ThreadStatus)
+
+
+def get_path(email: EmailInfo) -> Path:
+    if email.references:
+        # we're in an email thread
+        thread_reference = email.references.split(' ', 1)[0]
+    else:
+        thread_reference = email.message_id
+
+    thread_reference = re.sub(r'[^0-9a-zA-Z_\-.]', '_', thread_reference)
+    return Path(f'threads/{thread_reference:.12}.txt')
+
+
+@dataclass
+class NewEmail(BaseNode[None, None, EmailOk | EmailReply | EmailDrop]):
+    email: EmailInfo
+
+    async def run(self, ctx: GraphRunContext) -> ExtractEmails | NewEmailExchange | End[EmailOk | EmailReply | EmailDrop]:
+        if self.email.references:
+            # we're in an email thread
+            thread_path = get_path(self.email)
+            logfire.info('checking {path=!r} {exists=}', path=thread_path, exists=thread_path.exists())
+            if thread_path.exists():
+                status = ta.validate_json(thread_path.read_bytes())
+                if status == ThreadStatus.forwarding:
+                    return End(EmailOk('already forwarding'))
+                else:
+                    assert status == ThreadStatus.dropping
+                    return End(EmailDrop('already dropping'))
+
+            return ExtractEmails(self.email)
+        else:
+            return NewEmailExchange(self.email)
+
+
+@dataclass
+class NewEmailExchange(BaseNode):
+    email: EmailInfo
+
+    async def run(self, ctx: GraphRunContext) -> FinishStore:
+        msg = ThreadMessage(sender=self.email.from_, plain_text=self.email.text or self.email.html)
+        result = await new_thread_agent.run(f'New email thread:\n{format_as_xml(msg)}')
+        return FinishStore(self.email, result.data)
+
+
+@dataclass
+class ExtractEmails(BaseNode):
+    email: EmailInfo
+
+    async def run(self, ctx: GraphRunContext) -> NewReply:
+        result = await extract_agent.run(self.email.text or '')
+        thread = cast(list[ThreadMessage], result.data)
+        # reverse because the top message is the most recent
+        thread.reverse()
+        return NewReply(self.email, thread)
+
+
+@dataclass
+class NewReply(BaseNode):
+    email: EmailInfo
+    thread: list[ThreadMessage]
+
+    async def run(self, ctx: GraphRunContext) -> FinishStore:
+        result = await new_reply_agent.run(f'New reply in thread:\n{format_as_xml(self.thread)}')
+        return FinishStore(self.email, result.data)
+
+
+@dataclass
+class FinishStore(BaseNode[None, None, EmailOk | EmailReply | EmailDrop]):
+    email: EmailInfo
+    result: EmailOk | EmailReply | EmailDrop
+
+    async def run(self, ctx: GraphRunContext) -> End[EmailOk | EmailReply | EmailDrop]:
+        if isinstance(self.result, EmailReply):
+            # don't save status if we're replying
+            return End(self.result)
+
+        thread_path = get_path(self.email)
+        status = ThreadStatus.forwarding if isinstance(self.result, EmailOk) else ThreadStatus.dropping
+        logfire.info('writing {path!r=} {status=}', path=thread_path, status=status)
+        thread_path.parent.mkdir(exist_ok=True)
+        thread_path.write_bytes(ta.dump_json(status))
+        return End(self.result)
+
+
+email_graph = Graph(nodes=[NewEmail, NewEmailExchange, ExtractEmails, NewReply, FinishStore])
 
 
 @logfire.instrument()
 async def analyse_email(email: EmailInfo) -> EmailOk | EmailReply | EmailDrop:
-    state: ThreadState | None = None
-    if email.references:
-        thread_reference = email.references.split(' ', 1)[0]
-        ref_hash = hashlib.md5(thread_reference.encode()).hexdigest()
-        state_path = Path(f'threads/{ref_hash:.7}.json')
-        if state_path.exists():
-            state = ThreadState.model_validate_json(state_path.read_bytes())
-    else:
-        ref_hash = hashlib.md5(email.message_id.encode()).hexdigest()
-        state_path = Path(f'threads/{ref_hash:.7}.json')
-
-    node: BaseNode[ThreadState, None, Never]
-    if state is None:
-        state = ThreadState()
-        node = NewEmailExchange(email)
-    else:
-        node = NewReply(email)
-
-    with logfire.span('running graph', state_path=state_path):
-        history = []
-        while True:
-            next_node = await email_graph.next(node, history, state=state)
-            if isinstance(next_node, AgentReply | ForwardEmail | DropEmail):
-                response = next_node.response
-                state_path.parent.mkdir(exist_ok=True)
-                state_path.write_text(state.model_dump_json(indent=2))
-                return response
-            else:
-                assert isinstance(next_node, BaseNode)
-                node = next_node
+    response, _ = await email_graph.run(NewEmail(email))
+    return response
 
 
 if __name__ == '__main__':
     print('generating mermaid diagram...')
-    path = Path('email_graph.jpg')
-    email_graph.mermaid_save(path, start_node=[NewEmailExchange], highlighted_nodes=[NewReply])
-    print(f'saved mermaid diagram to {path}')
+    mermaid_path = Path('email_graph.jpg')
+    email_graph.mermaid_save(mermaid_path, start_node=[NewEmail])
+    print(f'saved mermaid diagram to {mermaid_path}')
