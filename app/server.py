@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncIterator, Mapping, Any
+from typing import AsyncIterator, Mapping, Any, Literal
 
 from pydantic import BaseModel
 from starlette.applications import Starlette
@@ -12,7 +12,8 @@ from email import message_from_bytes
 from email.utils import parsedate_to_datetime
 from httpx import AsyncClient
 
-from .send_email import send_email
+from .send_reply import send_reply
+from .analyse import analyse_email
 
 import logfire
 
@@ -26,19 +27,20 @@ class EmailInfo:
     subject: str
     to: str
     message_id: str
+    references: str | None
     timestamp: datetime
     text: str | None
     html: str | None
 
 
 class AnalysisResponse(BaseModel):
-    forward: bool
+    status: Literal['ok', 'reply', 'drop']
 
 
 @asynccontextmanager
 async def lifespan(_app: Starlette) -> AsyncIterator[Mapping[str, Any]]:
     async with AsyncClient() as client:
-        logfire.instrument_httpx(client, capture_headers=True)
+        logfire.instrument_httpx(client, capture_all=True)
         yield {'httpx_client': client}
 
 
@@ -68,17 +70,19 @@ async def analyze_email(request: Request):
         subject=str(msg['subject']),
         to=str(msg['to']),
         message_id=str(msg['Message-ID']),
+        references=str(msg['References']) if 'References' in msg else None,
         timestamp=timestamp,
         text=text_body,
         html=html_body,
     )
 
-    response = AnalysisResponse(forward=False)
-    logfire.info('subject={email.subject!r} {response=!r}', email=email, response=response)
+    email_analysis = await analyse_email(email)
+    logfire.info(f'{email_analysis=}')
+    if email_analysis.status == 'reply':
+        client: AsyncClient = request.state.httpx_client
+        await send_reply(client, email, email_analysis)
 
-    client: AsyncClient = request.state.httpx_client
-    await send_email(client, email)
-
+    response = AnalysisResponse(status=email_analysis.status)
     return Response(response.model_dump_json(), headers={'content-type': 'application/json'})
 
 

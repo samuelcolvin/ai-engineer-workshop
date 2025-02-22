@@ -1,7 +1,7 @@
 interface Env {}
 
 interface AnalysisResult {
-  forward: boolean
+  status: 'ok' | 'reply' | 'drop'
 }
 
 export default {
@@ -10,8 +10,8 @@ export default {
       method: 'POST',
       body: message.raw,
     })
-    const { forward }: AnalysisResult = await r.json()
-    if (forward) {
+    const { status }: AnalysisResult = await r.json()
+    if (status == 'ok') {
       console.log('forwarding email')
       await message.forward('samuel@pydantic.dev')
     }
