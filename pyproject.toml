@@ -9,6 +9,7 @@ dependencies = [
     "logfire[httpx,starlette]>=3.6.1",
     "markdown>=3.7",
     "pydantic>=2.10.6",
+    "pydantic-ai[openai]>=0.0.24",
     "pyright>=1.1.394",
     "ruff>=0.9.7",
     "starlette>=0.45.3",

@@ -55,9 +55,9 @@ async def analyze_email(request: Request):
 
         charset = part.get_content_charset() or 'utf-8'
         if content_type == 'text/plain':
-            text_body = part.get_payload(decode=True).decode(charset)
+            text_body = part.get_payload(decode=True).decode(charset)  # type: ignore
         elif content_type == 'text/html':
-            html_body = part.get_payload(decode=True).decode(charset)
+            html_body = part.get_payload(decode=True).decode(charset)  # type: ignore
 
     date = msg['Date']
     if date:
