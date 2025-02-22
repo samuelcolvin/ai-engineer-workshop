@@ -26,7 +26,7 @@ def run_code(python_code: str, python_dependencies: Sequence[str] = ()) -> dict[
     Returns:
         An object with stdout, stderr, and the return value of the code - output from the last line of code
     """
-    working_directory = Path(__file__).parent / 'run_code'
+    working_directory = Path(__file__).parent / 'pyodide_run_code'
     try:
         p = subprocess.run(
             ['node', 'run.mjs', repr(list(python_dependencies)), python_code],
